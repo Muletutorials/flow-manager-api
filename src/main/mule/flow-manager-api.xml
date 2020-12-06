@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:scripting="http://www.mulesoft.org/schema/mule/scripting"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/scripting http://www.mulesoft.org/schema/mule/scripting/current/mule-scripting.xsd">
+	<flow name="flow-manager-scriptFlow"
+		>
+		<http:listener doc:name="Listener"
+			config-ref="HTTP_Listener_config" path="/flowManager" />
+		<scripting:execute engine="groovy"
+			doc:name="Execute">
+			<scripting:code><![CDATA[flow = registry.lookupByName('schedulerFlow').get();
+if (flow.isStarted())
+    flow.stop()
+else flow.start()]]></scripting:code>
+		</scripting:execute>
+	</flow>
+	<flow name="schedulerFlow"
+		 initialState="stopped">
+		<scheduler doc:name="Scheduler"
+			>
+			<scheduling-strategy>
+				<fixed-frequency />
+			</scheduling-strategy>
+		</scheduler>
+		<logger level="INFO" doc:name="INFO: Logger"
+			
+			message="Scheduler Flow" />
+	</flow>
+	<flow name="flow-manager-armFlow"
+		>
+		<http:listener doc:name="Listener"
+			
+			config-ref="HTTP_Listener_config" path="/arm" />
+		<ee:transform doc:name="Set Login Data">
+			<ee:message>
+				<ee:set-payload><![CDATA[output application/json ---
+{
+    "username": "anypoint-usernmae",
+    "password": "anypoint-password"
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<http:request method="POST" doc:name="Get Access Token"
+			
+			config-ref="Anypoint_Request_Configuration" path="/accounts/login" target="accessToken"/>
+		<http:request method="GET" doc:name="Get Env and Org IDs"  config-ref="Anypoint_Request_Configuration" path="/accounts/api/profile" target="userProfile">
+			<http:headers ><![CDATA[#[{
+"Authorization" : "Bearer " ++ vars.accessToken.access_token
+}]]]></http:headers>
+		</http:request>
+		<set-variable value='#[vars.userProfile.organization.environments[?($.name == "Sandbox")].id[0]]' doc:name="envId"  variableName="envId"/>
+		<http:request method="GET" doc:name="Get Applications"  config-ref="Anypoint_Request_Configuration" path="/hybrid/api/v1/applications/" target="applicationId" targetValue='#[payload.data[?($.name == "fm-api")].id[0]]'>
+			<http:headers ><![CDATA[#[{
+	"Authorization" : "Bearer " ++ vars.accessToken.access_token,		
+	"x-anypnt-org-id": vars.userProfile.organizationId,
+	"x-anypnt-env-id": vars.envId
+}]]]></http:headers>
+		</http:request>
+		<http:request method="GET" doc:name="Get Flows"  config-ref="Anypoint_Request_Configuration" path='#["/hybrid/api/v1/applications/" ++ vars.applicationId ++ "/flows"]'>
+			<http:headers ><![CDATA[#[{
+	"Authorization" : "Bearer " ++ vars.accessToken.access_token,		
+	"x-anypnt-org-id": vars.userProfile.organizationId,
+	"x-anypnt-env-id": vars.envId
+}]]]></http:headers>
+		</http:request>
+		<ee:transform doc:name="Set Flow Metadata"  >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+fun getFlow() = payload.data[?($.name == "schedulerFlow")]
+---
+{
+    id: getFlow()[0].id,
+    newState: if(getFlow()[0].targets[0].lastReportedStatus == "STARTED") "STOPPED" else "STARTED"
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<http:request method="PATCH" doc:name="Toggle Flow"  config-ref="Anypoint_Request_Configuration" path='#["/hybrid/api/v1/applications/" ++ vars.applicationId ++ "/flows/" ++ payload.id]'>
+			<http:body ><![CDATA[#[{
+	desiredStatus: payload.newState
+}]]]></http:body>
+			<http:headers ><![CDATA[#[{
+	"Authorization" : "Bearer " ++ vars.accessToken.access_token,		
+	"x-anypnt-org-id": vars.userProfile.organizationId,
+	"x-anypnt-env-id": vars.envId
+}]]]></http:headers>
+		</http:request>
+		<logger level="INFO" doc:name="INFO: Completed"  message="Compelted, #[ payload.newState] scheduler flow"/>
+	</flow>
+</mule>
